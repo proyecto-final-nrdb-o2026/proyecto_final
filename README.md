@@ -1,82 +1,62 @@
-# Stream `recentchange` de Wikimedia
+# Proyecto final: detecciones de incendios y anomalías térmicas con NASA FIRMS
 
-## Resumen del stream
+Proyecto del curso **Bases de Datos No Relacionales (Otoño 2026)**. El objetivo es construir y documentar una arquitectura distribuida que convierta detecciones satelitales publicadas por [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) en datos operativos y analíticos. La fuente seleccionada es real; la arquitectura, los procesos y los resultados analíticos todavía están por implementarse.
 
-`recentchange` transmite eventos del feed de cambios recientes de MediaWiki: ediciones, creación de páginas, registros, cambios de categorías y otros cambios externos. Cada evento describe el cambio mediante metadatos como su tipo, página, wiki, marca temporal, usuario y comentario; en eventos de edición puede incluir además longitudes y revisiones anterior y nueva. No contiene por defecto el texto completo del artículo. El endpoint entrega eventos continuamente en tiempo real mediante EventStreams sobre HTTP/SSE. [EventStreams](https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service) · [Manual del feed Recent Changes](https://www.mediawiki.org/wiki/Manual:RCFeed/en)
+## Fuente de datos y alcance preliminar
 
-El stream reúne cambios de distintos proyectos y wikis Wikimedia. El atributo `wiki` identifica la base de datos del wiki (por ejemplo `enwiki`, `commonswiki` o `wikidatawiki`); `server_name` identifica el nombre de servidor y permite distinguir el dominio asociado. [Documentación de EventStreams](https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service)
+El *Fire Information for Resource Management System* (FIRMS) de NASA distribuye detecciones de fuegos activos y otras anomalías térmicas derivadas de sensores satelitales. Cada fila identifica un píxel donde se detectó una anomalía, con coordenadas, momento de adquisición y mediciones asociadas. **Una detección no equivale necesariamente a un incendio distinto, a su ubicación exacta ni a su superficie quemada**: el punto representa el centro del píxel observado y pueden existir otras fuentes de calor o falsos positivos.
 
-- Endpoint: [https://stream.wikimedia.org/v2/stream/recentchange](https://stream.wikimedia.org/v2/stream/recentchange)
-- Servicio: [EventStreams HTTP Service](https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service)
-- Especificación del feed: [Manual:RCFeed](https://www.mediawiki.org/wiki/Manual:RCFeed/en)
-- Esquema vigente: [current.yaml en GitHub](https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml)
+La propuesta inicial es consultar datos **VIIRS de NOAA-20 y NOAA-21 a escala mundial**, sujetos a validación con el equipo y con pruebas de disponibilidad y caudal. MODIS puede incorporarse si resulta necesario y se documentan las diferencias entre sensores y productos. NASA FIRMS publica resultados de la API en **lotes CSV**, no mediante un flujo de eventos individual de tipo push. El proyecto propone consultar periódicamente la API, identificar las detecciones nuevas, deduplicarlas y emitirlas como eventos hacia el sistema de ingesta. La frecuencia de consulta, la latencia, los criterios de identidad y el manejo de correcciones están pendientes de diseño y prueba.
+
+### Enlaces oficiales
+
+- [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/)
+- [API Area de FIRMS: fuentes, formato de solicitud y área geográfica](https://firms.modaps.eosdis.nasa.gov/api/area/)
+- [Atributos de datos de incendios activos MODIS y VIIRS](https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs)
+- [Preguntas frecuentes de FIRMS: significado de la detección, latencia y limitaciones](https://www.earthdata.nasa.gov/data/tools/firms/faq)
+
+La API Area utiliza una clave `MAP_KEY` y permite solicitar CSV con una fuente, un área (`world` o límites geográficos), un rango de 1 a 5 días y, opcionalmente, una fecha de inicio. Para el alcance preliminar, las fuentes son `VIIRS_NOAA20_NRT` y `VIIRS_NOAA21_NRT`. El patrón documentado por NASA es `https://firms.modaps.eosdis.nasa.gov/api/area/csv/[MAP_KEY]/[SOURCE]/[AREA_COORDINATES]/[DAY_RANGE]`, con un segmento opcional `[DATE]`. **No publicar claves reales ni URL que las incluyan** en el repositorio, incidencias, capturas o registros. La clave se suministrará mediante una variable de entorno al ejecutar el consumidor.
 
 ## Origen y autoría
 
-La Wikimedia Foundation (WMF) opera la infraestructura pública EventStreams, que expone flujos de eventos mediante HTTP y Server-Sent Events y se respalda internamente en Kafka. Los eventos `recentchange` se originan en MediaWiki cuando personas o sistemas automatizados realizan acciones que producen entradas de cambios recientes en los wikis. Por ello, la WMF mantiene y publica el servicio de distribución, mientras que quienes editan —personas o bots— originan las acciones registradas; ambos papeles no deben confundirse. [EventStreams: descripción y arquitectura](https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service) · [Manual:RCFeed](https://www.mediawiki.org/wiki/Manual:RCFeed/en)
+Los sensores VIIRS a bordo de NOAA-20 y NOAA-21 producen las observaciones satelitales; NASA LANCE FIRMS procesa y distribuye las detecciones de incendios activos para su consulta. Los datos NRT se publican después del paso del satélite y su latencia global puede ser de hasta unas horas según el producto y la disponibilidad. La periodicidad de publicación no equivale a una detección nueva por segundo en cada instante.
 
-## Diccionario de datos
+## Diccionario de datos preliminar: VIIRS NRT
 
-La tabla sigue el [esquema JSON vigente](https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml) y el esquema común al que este remite. En JSON Schema, si un atributo no aparece en una lista `required`, no queda garantizado por el esquema. La definición de `recentchange` no declara como obligatorios sus campos específicos; el esquema común exige el objeto `meta` y el sobre del evento `$schema` y `dt`. Además, se permiten propiedades adicionales para mantener compatibilidad. Por tanto, la presencia real depende del tipo de evento y de la wiki. “No admite nulo” describe el tipo declarado, no una garantía de presencia.
+Las definiciones siguientes proceden de la [tabla oficial de atributos de NASA](https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs). Los nombres y campos exactos del CSV de la API se contrastarán con una respuesta guardada para cada producto antes de cerrar el esquema de ingesta. En los servicios web NASA también denomina `brightness` a `bright_ti4` y `brightness_2` a `bright_ti5`.
 
-| Atributo / ruta | Tipo según esquema | Presencia / nulabilidad | Significado funcional | Ejemplo documentado |
-|---|---|---|---|---|
-| `$schema` | cadena | Obligatorio; no nulo | URI/identificador del esquema del evento. | `/mediawiki/recentchange/1.0.0` |
-| `dt` | cadena, fecha-hora (ISO 8601) | Obligatorio; no nulo | Fecha y hora del evento en el sobre común. | `2022-07-12T17:54:15Z` |
-| `meta` | objeto | Obligatorio; no nulo | Metadatos comunes del evento. | — |
-| `meta.domain` | cadena | Opcional en esta tabla (miembro de `meta`); no se admite nulo en su tipo documentado | Dominio asociado al evento. EventStreams lo usa en ejemplos para identificar eventos canary. | `www.wikidata.org` |
-| `meta.dt` | cadena | Opcional; el ejemplo de evento la expresa como fecha-hora ISO 8601 | Fecha y hora del evento en metadatos. La definición común la documenta como timestamp ISO 8601. | `2022-07-12T17:54:15Z` |
-| `meta.id` | cadena | Opcional; no nulo en el ejemplo documentado | Identificador único del evento en metadatos. | `2cdec62f-a2b3-49b8-9a52-85a42236fb99` |
-| `meta.offset` | entero | Opcional; no nulo en el ejemplo documentado | Desplazamiento/posición asociado al evento. | `4000957901` |
-| `meta.partition` | entero | Opcional; no nulo en el ejemplo documentado | Partición asociada al evento. | `0` |
-| `meta.request_id` | cadena | Opcional; no nulo en el ejemplo documentado | Identificador de solicitud asociado al evento. | `f7896e77-fd2b-4a95-a9e4-44c1e3ad818b` |
-| `meta.stream` | cadena | Opcional; no nulo en el ejemplo documentado | Nombre del stream. | `mediawiki.recentchange` |
-| `meta.topic` | cadena | Opcional; no nulo en el ejemplo documentado | Tema Kafka de origen. | `eqiad.mediawiki.recentchange` |
-| `meta.uri` | cadena | Opcional; no nulo en el ejemplo documentado | URI asociada al evento/página. | `https://www.wikidata.org/wiki/Q2190037` |
-| `id` | entero o nulo | Opcional; admite nulo | ID de la entrada de cambio reciente (`rcid`). | `1728475074` |
-| `type` | cadena | Opcional; no nulo si está presente | Tipo de evento; valores principales: `edit`, `new`, `log`, `categorize` o `external`. | `edit` |
-| `title` | cadena | Opcional; no nulo si está presente | Nombre completo de la página afectada, con prefijo de espacio de nombres. | `Q2190037` |
-| `namespace` | entero | Opcional; no nulo si está presente | ID del espacio de nombres afectado; el esquema indica `-1` para eventos de log. | `0` |
-| `comment` | cadena | Opcional; no nulo si está presente | Comentario de la entrada de cambio reciente (`rc_comment`). | `sorting image request` |
-| `parsedcomment` | cadena | Opcional; no admite nulo según el tipo declarado | Comentario parseado como HTML simple. | `<span dir="auto">…</span>` |
-| `timestamp` | entero | Opcional; no nulo si está presente | Timestamp Unix derivado de `rc_timestamp`. | `1657648455` |
-| `user` | cadena | Opcional; no nulo si está presente | Texto del usuario (`rc_user_text`). | `KrBot` |
-| `bot` | booleano | Opcional; no nulo si está presente | Indicador de que la entrada fue marcada como bot (`rc_bot`). | `true` |
-| `server_url` | cadena | Opcional; no nulo si está presente | Servidor canónico (`$wgCanonicalServer`). | `https://www.wikidata.org` |
-| `server_name` | cadena | Opcional; no nulo si está presente | Nombre del servidor (`$wgServerName`). | `www.wikidata.org` |
-| `server_script_path` | cadena | Opcional; no nulo si está presente | Ruta del script de MediaWiki (`$wgScriptPath`). | `/w` |
-| `wiki` | cadena | Opcional; no nulo si está presente | Identificador del wiki (`wfWikiID`, derivado de configuración de base de datos). | `wikidatawiki` |
-| `minor` | booleano | Opcional; campo asociado a eventos `edit` y `new`; no admite nulo | Indicador de cambio menor (`rc_minor`). | `false` |
-| `patrolled` | booleano | Opcional; asociado a edición/nueva página y solo presente si la wiki admite patrullaje para ese evento; no admite nulo | Indicador de patrullaje (`rc_patrolled`). | `true` |
-| `length` | objeto | Opcional; asociado a eventos `edit` y `new` | Longitud anterior y nueva del cambio. | — |
-| `length.old` | entero o nulo | Opcional; admite nulo | Longitud anterior (`rc_old_len`); puede ser nula cuando no hay longitud anterior, por ejemplo al crear una página. | `186` |
-| `length.new` | entero o nulo | Opcional; admite nulo | Longitud nueva (`rc_new_len`). | `219` |
-| `revision` | objeto | Opcional; asociado a eventos `edit` y `new` | Identificadores de revisión anterior y nueva. | — |
-| `revision.new` | entero o nulo | Opcional; admite nulo | Campo descrito en el esquema como `rc_last_oldid`. | `649690049` |
-| `revision.old` | entero o nulo | Opcional; admite nulo | Campo descrito en el esquema como `rc_this_oldid`. | `649645633` |
-| `log_id` | entero o nulo | Opcional; campo asociado a eventos `log`; admite nulo | ID del registro (`rc_log_id`). | — |
-| `log_type` | cadena o nulo | Opcional; campo asociado a eventos `log`; admite nulo | Tipo de registro (`rc_log_type`). | — |
-| `log_action` | cadena | Opcional; campo asociado a eventos `log`; no admite nulo | Acción del registro (`rc_log_action`). | — |
-| `log_params` | arreglo, objeto o cadena | Opcional; solo se incluye si el evento tiene `rc_params`; el tipo no declara `null` | Parámetros del registro; para objetos se permiten propiedades adicionales. | — |
-| `log_action_comment` | cadena o nulo | Opcional; asociado a eventos de log; admite nulo | Comentario de la acción de log. El esquema no ofrece una definición funcional más específica. | — |
+| Campo | Naturaleza | Descripción |
+| --- | --- | --- |
+| `latitude` | Cuantitativa / geográfica | Latitud del centro del píxel detectado, en grados. |
+| `longitude` | Cuantitativa / geográfica | Longitud del centro del píxel detectado, en grados. |
+| `bright_ti4` (`brightness` en servicios web) | Cuantitativa | Temperatura de brillo del canal VIIRS I-4, en kelvin. |
+| `scan` | Cuantitativa | Dimensión del píxel en la dirección de barrido; varía con la geometría de observación. |
+| `track` | Cuantitativa | Dimensión del píxel en la dirección de avance orbital. |
+| `acq_date` | Temporal | Fecha de adquisición de la detección. |
+| `acq_time` | Temporal | Hora de adquisición en UTC; debe interpretarse junto con `acq_date`. |
+| `satellite` | Cualitativa | Plataforma de origen, por ejemplo `N20` o `N21`. |
+| `confidence` | Cualitativa | Confianza VIIRS baja, nominal o alta; no es un porcentaje como en MODIS. |
+| `version` | Cualitativa | Colección y modalidad de procesamiento del producto. |
+| `bright_ti5` (`brightness_2` en servicios web) | Cuantitativa | Temperatura de brillo del canal VIIRS I-5, en kelvin. |
+| `frp` | Cuantitativa | Potencia radiativa estimada del píxel, en megavatios (MW). |
+| `daynight` | Cualitativa | Indicador de observación diurna (`D`) o nocturna (`N`). |
 
-**Nota sobre `revision`:** el esquema vigente etiqueta `revision.new` como `rc_last_oldid` y `revision.old` como `rc_this_oldid`, mientras que el manual del feed describe los nombres en sentido opuesto (`revision.new` como revisión nueva/`rc_this_oldid` y `revision.old` como revisión anterior/`rc_last_oldid`). Se conserva arriba la asociación literal del esquema solicitado; para interpretar estos dos subcampos, esta discrepancia documental debe resolverse consultando la versión de implementación o validando eventos reales. [Esquema GitHub](https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml) · [Manual:RCFeed](https://www.mediawiki.org/wiki/Manual:RCFeed/en)
+Estos 13 atributos están descritos en la tabla de NASA para VIIRS NRT. Una prueba previa comunicada por el equipo reportó **14 columnas en una respuesta de FIRMS**; la columna adicional y las diferencias de nombre quedan pendientes de comprobar directamente en la respuesta de la API. La fuente no ofrece un campo de texto libre como parte de este diccionario preliminar. Las series temporales se construirán combinando `acq_date` y `acq_time` en UTC, distinguiendo la hora de observación de la de publicación e ingesta cuando esas marcas se registren en el pipeline.
 
-Los ejemplos se toman del manual y de un ejemplo de evento citado por la documentación de Pywikibot; los guiones indican que el esquema o la documentación consultada no proporcionan un ejemplo concreto para ese campo. [Ejemplos del manual](https://www.mediawiki.org/wiki/Manual:RCFeed/en) · [Evento de ejemplo en Pywikibot](https://github.com/wikimedia/pywikibot/blob/master/pywikibot/comms/eventstreams.py)
+## Caudal y viabilidad del requisito de stream
 
-## Clasificación de variables
+La rúbrica exige un promedio mínimo de **1 evento por segundo** y permite combinar fuentes. En una revisión previa comunicada por el equipo, para el **8 de noviembre de 2026** a escala mundial se reportaron **119 498 detecciones VIIRS NOAA-20 y NOAA-21**, equivalentes a aproximadamente **1,38 detecciones por segundo** en ese día; al añadir MODIS se reportaron **131 462 detecciones**, aproximadamente **1,52 por segundo**. Son antecedentes de una sola fecha, **no mediciones reproducidas en este repositorio ni garantía de caudal sostenido, entrega uniforme o eventos nuevos en cada segundo**. Se medirá el volumen en varios días, separado por producto, y se registrará tanto el caudal de detecciones únicas como el de eventos realmente ingresados sin pérdida. También se consultará al profesor si acepta el esquema de consulta periódica y emisión de eventos como stream del proyecto.
 
-- **Cuantitativos:** `id`, `namespace`, `timestamp`, `length.old`, `length.new`, `revision.new`, `revision.old` y `log_id` son numéricos según el esquema. Representan identificadores, categorías numéricas o medidas; que un ID sea entero no lo convierte por sí solo en una medida de magnitud. Los subcampos de `meta` `offset` y `partition` también se representan como enteros en el ejemplo de evento documentado.
-- **Cualitativos:** `type`, `title`, `user`, `wiki`, `server_url`, `server_name`, `server_script_path`, `log_type`, `log_action`, `log_params` y los identificadores textuales de `meta` son cadenas u otros valores nominales/categóricos. `bot`, `minor` y `patrolled` son indicadores booleanos, no medidas continuas. `namespace` también puede usarse como categoría pese a su codificación numérica.
-- **Texto no estructurado:** `comment` y `log_action_comment` contienen comentarios; `parsedcomment` contiene su representación HTML parseada. Aunque `log_params` puede ser una cadena, un arreglo u objeto, el esquema no define una semántica común de texto libre para todas sus formas.
-- **Series temporales:** `timestamp` es un entero Unix y `dt`/`meta.dt` son fechas-horas ISO 8601. La clasificación temporal se refiere al significado cronológico, aunque sus tipos de almacenamiento difieran.
+## Consideraciones éticas y limitaciones
 
-Un mismo atributo puede tener más de una lectura analítica: `namespace` es entero pero representa una categoría; los IDs son numéricos pero nominales; `timestamp` es numérico en el esquema y temporal por significado.
+Las detecciones pueden omitirse por nubosidad, humo, cobertura vegetal, tamaño o duración del fuego, e incluir otras anomalías o artefactos. Las diferencias de resolución, latencia, cobertura y confianza entre productos impiden comparar recuentos o potencia radiativa como si representaran automáticamente número de incendios, daños o riesgo humano. Las consultas y visualizaciones deben conservar el origen del satélite, el producto, las marcas temporales y la incertidumbre; no se publicarán coordenadas como confirmación de un incendio puntual sin verificación independiente. El uso de los datos respetará la atribución recomendada por [NASA FIRMS](https://www.earthdata.nasa.gov/data/tools/firms/faq).
 
-## Consideraciones éticas
+## Plan de implementación y documentación
 
-Los eventos pueden exponer nombres de usuario, títulos de páginas, dominios/URIs y comentarios públicos. Estos elementos pueden permitir reconocer o vincular actividad, incluso sin que el esquema incluya datos de contacto o atributos personales adicionales. Los comentarios pueden contener referencias identificables o contexto sensible escrito por quienes editan, por lo que su disponibilidad pública no elimina el deber de usarlos con cuidado.
+1. **Validación de la fuente:** fijar productos y región, capturar encabezados reales, medir varios días de datos y acordar con el profesor el mecanismo de conversión de lotes a eventos.
+2. **Infraestructura:** documentar y desplegar una base NoSQL operativa con replicación y sharding, una capa analítica apropiada, control de accesos, diagramas y una justificación explícita en términos de CAP. Las tecnologías concretas aún no están elegidas.
+3. **Ingesta:** implementar consulta periódica, deduplicación, manejo de errores, inserción y consultas puntuales; medir caudal, pérdida y recuperación ante fallos.
+4. **Procesamiento:** limpiar y tipar datos, enriquecerlos con fuentes estáticas cuando aporte valor, conservar trazabilidad y preparar agregaciones analíticas.
+5. **Resultados:** ejecutar al menos cinco consultas analíticas complejas, explicar hallazgos e impacto, y mostrar la evolución desde el CSV crudo hasta la información transformada.
 
-Los títulos y comentarios aparecen en distintos idiomas y convenciones editoriales. Una comparación automática puede confundir diferencias lingüísticas o de formato con diferencias de calidad. Asimismo, `bot` es un indicador operativo, no una evaluación de intención; `minor`, el tamaño del cambio o una reversión aislada no prueban vandalismo ni calidad. El stream aporta metadatos del cambio y no basta por sí solo para inferir motivos o conclusiones sobre personas.
-
-Para reducir riesgos, en reportes agregados omite `user`, IDs de evento/revisión y otros identificadores cuando no sean necesarios; evita republicar comentarios textuales o títulos identificables innecesariamente; limita el acceso y la retención a lo necesario para el análisis; interpreta comparaciones por idioma y wiki con su contexto; y no etiquetes una edición como maliciosa basándote únicamente en el tamaño, el indicador de bot o la presencia de una reversión.
+El código, las instrucciones de ejecución, las pruebas, las decisiones de diseño, los diagramas y los resultados se incorporarán a este repositorio conforme se implementen. Hasta entonces, este README documenta **la fuente elegida y el estado preliminar**, no una arquitectura ya desplegada.
