@@ -6,7 +6,7 @@ Proyecto del curso **Bases de Datos No Relacionales (Otoño 2026)**. El objetivo
 
 El *Fire Information for Resource Management System* (FIRMS) de NASA distribuye detecciones de fuegos activos y otras anomalías térmicas derivadas de sensores satelitales. Cada fila identifica un píxel donde se detectó una anomalía, con coordenadas, momento de adquisición y mediciones asociadas. **Una detección no equivale necesariamente a un incendio distinto, a su ubicación exacta ni a su superficie quemada**: el punto representa el centro del píxel observado y pueden existir otras fuentes de calor o falsos positivos.
 
-La propuesta inicial es consultar datos **VIIRS de NOAA-20 y NOAA-21 a escala mundial**, sujetos a validación con el equipo y con pruebas de disponibilidad y caudal. MODIS puede incorporarse si resulta necesario y se documentan las diferencias entre sensores y productos. NASA FIRMS publica resultados de la API en **lotes CSV**, no mediante un flujo de eventos individual de tipo push. El proyecto propone consultar periódicamente la API, identificar las detecciones nuevas, deduplicarlas y emitirlas como eventos hacia el sistema de ingesta. La frecuencia de consulta, la latencia, los criterios de identidad y el manejo de correcciones están pendientes de diseño y prueba.
+La propuesta inicial es consultar datos **VIIRS de NOAA-20 y NOAA-21 a escala mundial**, sujetos a validación con el equipo y con pruebas de disponibilidad y caudal. El alcance inicial queda limitado a NOAA-20 y NOAA-21; S-NPP y MODIS no se incluyen en esta etapa. NASA FIRMS publica resultados de la API en **lotes CSV**, no mediante un flujo de eventos individual de tipo push. El proyecto propone consultar periódicamente la API, identificar las detecciones nuevas, deduplicarlas y emitirlas como eventos hacia el sistema de ingesta. La frecuencia de consulta, la latencia, los criterios de identidad y el manejo de correcciones están pendientes de diseño y prueba.
 
 ### Enlaces oficiales
 
@@ -43,17 +43,77 @@ Las definiciones siguientes proceden de la [tabla oficial de atributos de NASA](
 
 Estos 13 atributos están descritos en la tabla de NASA para VIIRS NRT. Una prueba previa comunicada por el equipo reportó **14 columnas en una respuesta de FIRMS**; la columna adicional y las diferencias de nombre quedan pendientes de comprobar directamente en la respuesta de la API. La fuente no ofrece un campo de texto libre como parte de este diccionario preliminar. Las series temporales se construirán combinando `acq_date` y `acq_time` en UTC, distinguiendo la hora de observación de la de publicación e ingesta cuando esas marcas se registren en el pipeline.
 
-## Resumen de la Arquitectura e Implementación
+## Arquitectura objetivo
 
-Este proyecto implementa una arquitectura distribuida de datos no relacionales de extremo a extremo para la ingesta, procesamiento analítico y visualización en tiempo real de anomalías térmicas globales provenientes de **NASA FIRMS** (sensores satelitales VIIRS NOAA-20, NOAA-21, S-NPP y MODIS).
+La arquitectura objetivo procesa detecciones globales **VIIRS de NOAA-20 y NOAA-21** publicadas por NASA FIRMS. En esta primera etapa se prepara la infraestructura local reproducible; el consumidor, los jobs analíticos y la visualización se implementarán en fases posteriores.
 
 ### Flujo de Datos
 1. **Ingesta (Consumidor Python):** Un servicio consulta periódicamente los lotes CSV de la API de NASA FIRMS (combinando sensores para sostener un caudal promedio $\ge 1$ evento/segundo) e inserta los eventos crudos directamente en MongoDB como estado de verdad operativa.
 2. **Capa Operativa y Seguridad (MongoDB):** Clúster distribuido en Docker con **sharding y replicación** (priorizando **CP** según el teorema CAP). Cuenta con índices geoespaciales (`2dsphere`) y temporales para consultas de baja latencia, control de accesos basado en roles (**RBAC** con usuarios independientes por servicio), autenticación interna mediante `keyFile`, aislamiento en red privada y gestión de credenciales con `.env`.
 3. **Procesamiento y Enriquecimiento (Apache Spark):** Jobs distribuidos que leen los eventos crudos desde MongoDB para eliminar duplicados, normalizar marcas de tiempo (ISO-8601) y coordenadas (GeoJSON), y enriquecer cada detección cruzándola espacialmente con datasets estáticos (países/regiones, áreas naturales protegidas y volcanes/zonas industriales).
-4. **Capa Analítica (OLAP):** Los datos limpios y enriquecidos se almacenan en formato columnar (`Parquet / Iceberg / Hive`) para ejecutar consultas analíticas complejas y garantizar la trazabilidad completa del ciclo de vida del dato.
+4. **Capa Analítica (OLAP):** Los datos limpios y enriquecidos se almacenan como archivos Parquet en MinIO, compatible con la API S3, para ejecutar consultas analíticas complejas y garantizar la trazabilidad completa del ciclo de vida del dato.
 5. **Visualización en Tiempo Real:** Un backend escucha las inserciones en MongoDB mediante **Change Streams** y transmite los eventos nuevos vía **SSE/WebSockets** hacia un mapa interactivo con aceleración WebGL (**MapLibre GL JS + Deck.gl**), permitiendo monitorear intensidad (`FRP`), filtros de confianza y evolución temporal sin recargar la página.
 
+## Entorno local reproducible
+
+### Requisitos
+
+- Windows con Docker Desktop configurado para contenedores Linux, o Docker Engine con Docker Compose v2.
+- `uv` para Python 3.12.
+- Asignar recursos suficientes a Docker: la topología local incluye tres config servers, seis nodos de datos MongoDB, un router, Spark master/worker y MinIO.
+
+### Preparación
+
+1. Generar o completar las credenciales locales sin reemplazar variables ya existentes (incluida la `MAP_KEY`):
+
+   ```powershell
+   .\scripts\prepare-env.ps1
+   ```
+
+   El script crea `.env` si falta o agrega solamente las variables de infraestructura ausentes. Genera contraseñas aleatorias para MongoDB y MinIO. Agrega `MAP_KEY` manualmente si aún no está en `.env`; no se necesita para iniciar esta infraestructura.
+
+2. Crear el entorno virtual e instalar las dependencias fijadas en `uv.lock`:
+
+   ```powershell
+   uv sync --locked
+   ```
+
+3. Descargar las imágenes fijadas en Compose:
+
+   ```powershell
+   docker compose pull
+   ```
+
+4. Iniciar los servicios:
+
+   ```powershell
+   docker compose up -d
+   ```
+
+   La primera ejecución inicializa automáticamente las tres replica sets (config servers y dos shards), registra ambos shards en `mongos` y crea el bucket `firms-analytics` en MinIO.
+
+### Servicios locales
+
+| Servicio | Dirección desde el host | Función |
+| --- | --- | --- |
+| MongoDB `mongos` | `localhost:27017` (usuario y contraseña de `.env`, autenticación en `admin`) | Router hacia dos shards replicados (tres miembros de datos por shard). |
+| MinIO API | `http://localhost:9000` | Almacenamiento de objetos compatible con S3 para Parquet. |
+| MinIO Console | `http://localhost:9001` | Consola local para inspeccionar el bucket analítico. |
+| Spark master UI | `http://localhost:8080` | Estado del clúster de procesamiento. |
+| Spark worker UI | `http://localhost:8081` | Estado del worker local. |
+
+Las interfaces se enlazan a `localhost`; las credenciales están en `.env`. El keyfile de autenticación interna de MongoDB se genera dentro de un volumen Docker y no se guarda en el repositorio. Los datos persisten en volúmenes nombrados; `docker compose down` detiene los servicios y conserva los datos.
+
+Para revisar el estado y la inicialización:
+
+```powershell
+docker compose ps
+docker compose logs mongo-config-init mongo-shard1-init mongo-shard2-init mongo-add-shards minio-init
+```
+
+El Compose fija versiones de MongoDB, Spark y MinIO. Para MinIO usa `dappros/minio`, una copia espejo de terceros, porque los repositorios oficiales ya no permitieron completar pulls anónimos desde esta instalación. El inicializador crea el bucket mediante la API S3 con Python estándar, sin depender de la imagen `mc`. La imagen de MinIO es un espejo no oficial; esta configuración es para desarrollo local del proyecto, no una recomendación de despliegue productivo.
+
+Esta etapa no incluye todavía el consumidor de FIRMS, los jobs Spark de limpieza/enriquecimiento ni el backend y mapa. Por ello, iniciar los contenedores no equivale a demostrar el caudal de la fuente, la carga de datos ni las cinco consultas analíticas.
 ## Caudal y viabilidad del requisito de stream
 
 La rúbrica exige un promedio mínimo de **1 evento por segundo** y permite combinar fuentes. En una revisión previa comunicada por el equipo, para el **8 de noviembre de 2026** a escala mundial se reportaron **119 498 detecciones VIIRS NOAA-20 y NOAA-21**, equivalentes a aproximadamente **1,38 detecciones por segundo** en ese día; al añadir MODIS se reportaron **131 462 detecciones**, aproximadamente **1,52 por segundo**. Son antecedentes de una sola fecha, **no mediciones reproducidas en este repositorio ni garantía de caudal sostenido, entrega uniforme o eventos nuevos en cada segundo**. Se medirá el volumen en varios días, separado por producto, y se registrará tanto el caudal de detecciones únicas como el de eventos realmente ingresados sin pérdida. También se consultará al profesor si acepta el esquema de consulta periódica y emisión de eventos como stream del proyecto.
@@ -65,7 +125,7 @@ Las detecciones pueden omitirse por nubosidad, humo, cobertura vegetal, tamaño 
 ## Plan de implementación y documentación
 
 1. **Validación de la fuente:** fijar productos y región, capturar encabezados reales, medir varios días de datos y acordar con el profesor el mecanismo de conversión de lotes a eventos.
-2. **Infraestructura:** documentar y desplegar una base NoSQL operativa con replicación y sharding, una capa analítica apropiada, control de accesos, diagramas y una justificación explícita en términos de CAP. Las tecnologías concretas aún no están elegidas.
+2. **Infraestructura:** documentar y desplegar una base NoSQL operativa con replicación y sharding, una capa analítica apropiada, control de accesos, diagramas y una justificación explícita en términos de CAP. La infraestructura local usa MongoDB para la capa operacional, Spark para procesamiento y Parquet en MinIO para la capa analítica.
 3. **Ingesta:** implementar consulta periódica, deduplicación, manejo de errores, inserción y consultas puntuales; medir caudal, pérdida y recuperación ante fallos.
 4. **Procesamiento:** limpiar y tipar datos, enriquecerlos con fuentes estáticas cuando aporte valor, conservar trazabilidad y preparar agregaciones analíticas.
 5. **Resultados:** ejecutar al menos cinco consultas analíticas complejas, explicar hallazgos e impacto, y mostrar la evolución desde el CSV crudo hasta la información transformada.

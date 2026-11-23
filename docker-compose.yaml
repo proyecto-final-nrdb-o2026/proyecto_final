@@ -1,0 +1,313 @@
+name: nasa-firms
+
+x-mongo-common: &mongo-common
+  image: mongo:8.0.38-noble
+  restart: unless-stopped
+  volumes:
+    - mongo-keyfile:/run/keyfiles:ro
+  networks:
+    - project-net
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - >-
+        mongosh --quiet --eval "db.hello().ok" | grep -q 1
+    interval: 10s
+    timeout: 5s
+    retries: 15
+    start_period: 30s
+
+services:
+  mongo-keyfile-init:
+    image: mongo:8.0.38-noble
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        if [ ! -s /keyfiles/mongodb-keyfile ]; then
+          openssl rand -base64 756 > /keyfiles/mongodb-keyfile
+          chown mongodb:mongodb /keyfiles/mongodb-keyfile
+          chmod 400 /keyfiles/mongodb-keyfile
+        fi
+    volumes:
+      - mongo-keyfile:/keyfiles
+    restart: "no"
+    networks:
+      - project-net
+
+  configsvr1:
+    <<: *mongo-common
+    command: ["--configsvr", "--replSet", "cfgRS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - configsvr1-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  configsvr2:
+    <<: *mongo-common
+    command: ["--configsvr", "--replSet", "cfgRS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - configsvr2-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  configsvr3:
+    <<: *mongo-common
+    command: ["--configsvr", "--replSet", "cfgRS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - configsvr3-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard1-1:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard1RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard1-1-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard1-2:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard1RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard1-2-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard1-3:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard1RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard1-3-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard2-1:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard2RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard2-1-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard2-2:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard2RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard2-2-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  shard2-3:
+    <<: *mongo-common
+    command: ["--shardsvr", "--replSet", "shard2RS", "--bind_ip_all", "--port", "27017", "--auth", "--keyFile", "/run/keyfiles/mongodb-keyfile", "--wiredTigerCacheSizeGB", "0.25"]
+    depends_on:
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    volumes:
+      - shard2-3-data:/data/db
+      - mongo-keyfile:/run/keyfiles:ro
+
+  mongo-router:
+    <<: *mongo-common
+    command: ["mongos", "--configdb", "cfgRS/configsvr1:27017,configsvr2:27017,configsvr3:27017", "--bind_ip_all", "--port", "27017", "--keyFile", "/run/keyfiles/mongodb-keyfile"]
+    ports:
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
+    depends_on:
+      configsvr1:
+        condition: service_started
+      configsvr2:
+        condition: service_started
+      configsvr3:
+        condition: service_started
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+
+  mongo-config-init:
+    image: mongo:8.0.38-noble
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set.sh"]
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:?Agrega MONGO_ROOT_USER a .env usando .env.example}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Agrega MONGO_ROOT_PASSWORD a .env usando .env.example}
+      REPLICA_SET_NAME: cfgRS
+      REPLICA_SET_SEEDS: configsvr1:27017,configsvr2:27017,configsvr3:27017
+      REPLICA_SET_CONFIG: '{"_id":"cfgRS","configsvr":true,"members":[{"_id":0,"host":"configsvr1:27017"}]}'
+      REPLICA_SET_MEMBERS: configsvr2:27017,configsvr3:27017
+      CREATE_ROOT_USER: "true"
+    volumes:
+      - ./docker/mongo/init-replica-set.sh:/scripts/init-replica-set.sh:ro
+    network_mode: service:configsvr1
+    depends_on:
+      configsvr1:
+        condition: service_started
+      configsvr2:
+        condition: service_started
+      configsvr3:
+        condition: service_started
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  mongo-shard1-init:
+    image: mongo:8.0.38-noble
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set.sh"]
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:?Agrega MONGO_ROOT_USER a .env usando .env.example}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Agrega MONGO_ROOT_PASSWORD a .env usando .env.example}
+      REPLICA_SET_NAME: shard1RS
+      REPLICA_SET_SEEDS: shard1-1:27017,shard1-2:27017,shard1-3:27017
+      REPLICA_SET_CONFIG: '{"_id":"shard1RS","members":[{"_id":0,"host":"shard1-1:27017"}]}'
+      REPLICA_SET_MEMBERS: shard1-2:27017,shard1-3:27017
+      CREATE_ROOT_USER: "true"
+    volumes:
+      - ./docker/mongo/init-replica-set.sh:/scripts/init-replica-set.sh:ro
+    network_mode: service:shard1-1
+    depends_on:
+      shard1-1:
+        condition: service_started
+      shard1-2:
+        condition: service_started
+      shard1-3:
+        condition: service_started
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  mongo-shard2-init:
+    image: mongo:8.0.38-noble
+    entrypoint: ["/bin/bash", "/scripts/init-replica-set.sh"]
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:?Agrega MONGO_ROOT_USER a .env usando .env.example}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Agrega MONGO_ROOT_PASSWORD a .env usando .env.example}
+      REPLICA_SET_NAME: shard2RS
+      REPLICA_SET_SEEDS: shard2-1:27017,shard2-2:27017,shard2-3:27017
+      REPLICA_SET_CONFIG: '{"_id":"shard2RS","members":[{"_id":0,"host":"shard2-1:27017"}]}'
+      REPLICA_SET_MEMBERS: shard2-2:27017,shard2-3:27017
+      CREATE_ROOT_USER: "true"
+    volumes:
+      - ./docker/mongo/init-replica-set.sh:/scripts/init-replica-set.sh:ro
+    network_mode: service:shard2-1
+    depends_on:
+      shard2-1:
+        condition: service_started
+      shard2-2:
+        condition: service_started
+      shard2-3:
+        condition: service_started
+      mongo-keyfile-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  mongo-add-shards:
+    image: mongo:8.0.38-noble
+    entrypoint: ["/bin/bash", "/scripts/add-shards.sh"]
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:?Agrega MONGO_ROOT_USER a .env usando .env.example}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Agrega MONGO_ROOT_PASSWORD a .env usando .env.example}
+    volumes:
+      - ./docker/mongo/add-shards.sh:/scripts/add-shards.sh:ro
+    networks:
+      - project-net
+    depends_on:
+      mongo-config-init:
+        condition: service_completed_successfully
+      mongo-shard1-init:
+        condition: service_completed_successfully
+      mongo-shard2-init:
+        condition: service_completed_successfully
+      shard1-1:
+        condition: service_started
+      mongo-router:
+        condition: service_started
+    restart: "no"
+
+  minio:
+    image: dappros/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Agrega MINIO_ROOT_USER a .env usando .env.example}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Agrega MINIO_ROOT_PASSWORD a .env usando .env.example}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    restart: unless-stopped
+    networks:
+      - project-net
+
+  minio-init:
+    image: python:3.12.14-slim-bookworm
+    command: ["python", "/scripts/init-bucket.py"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Agrega MINIO_ROOT_USER a .env usando .env.example}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Agrega MINIO_ROOT_PASSWORD a .env usando .env.example}
+      ANALYTICS_BUCKET: firms-analytics
+      MINIO_ENDPOINT: http://minio:9000
+    volumes:
+      - ./docker/minio/init-bucket.py:/scripts/init-bucket.py:ro
+    depends_on:
+      minio:
+        condition: service_started
+    restart: "no"
+    networks:
+      - project-net
+
+  spark-master:
+    image: spark:4.1.4-scala2.13-java17-python3-ubuntu
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "127.0.0.1:${SPARK_MASTER_UI_PORT:-8080}:8080"
+    restart: unless-stopped
+    networks:
+      - project-net
+
+  spark-worker:
+    image: spark:4.1.4-scala2.13-java17-python3-ubuntu
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 1g
+    ports:
+      - "127.0.0.1:${SPARK_WORKER_UI_PORT:-8081}:8081"
+    depends_on:
+      - spark-master
+    restart: unless-stopped
+    networks:
+      - project-net
+
+volumes:
+  mongo-keyfile:
+  configsvr1-data:
+  configsvr2-data:
+  configsvr3-data:
+  shard1-1-data:
+  shard1-2-data:
+  shard1-3-data:
+  shard2-1-data:
+  shard2-2-data:
+  shard2-3-data:
+  minio-data:
+
+networks:
+  project-net:
+    driver: bridge
