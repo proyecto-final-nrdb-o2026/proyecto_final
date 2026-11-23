@@ -64,13 +64,15 @@ La arquitectura objetivo procesa detecciones globales **VIIRS de NOAA-20 y NOAA-
 
 ### Preparación
 
-1. Generar o completar las credenciales locales sin reemplazar variables ya existentes (incluida la `MAP_KEY`):
+Elige los comandos de tu terminal. Los bloques de PowerShell se usan en PowerShell; los bloques Bash funcionan en Linux/macOS y en zsh. Desde zsh, el script Bash se puede ejecutar con `bash scripts/prepare-env.sh`.
+
+#### PowerShell
+
+1. Generar o completar las credenciales locales sin reemplazar variables ya existentes:
 
    ```powershell
    .\scripts\prepare-env.ps1
    ```
-
-   El script crea `.env` si falta o agrega solamente las variables de infraestructura ausentes. Genera contraseñas aleatorias para MongoDB y MinIO. Agrega `MAP_KEY` manualmente si aún no está en `.env`; no se necesita para iniciar esta infraestructura.
 
 2. Crear el entorno virtual e instalar las dependencias fijadas en `uv.lock`:
 
@@ -78,19 +80,37 @@ La arquitectura objetivo procesa detecciones globales **VIIRS de NOAA-20 y NOAA-
    uv sync --locked
    ```
 
-3. Descargar las imágenes fijadas en Compose:
+3. Descargar las imágenes fijadas en Compose e iniciar los servicios:
 
    ```powershell
    docker compose pull
-   ```
-
-4. Iniciar los servicios:
-
-   ```powershell
    docker compose up -d
    ```
 
-   La primera ejecución inicializa automáticamente las tres replica sets (config servers y dos shards), registra ambos shards en `mongos` y crea el bucket `firms-analytics` en MinIO.
+#### Bash (Linux/macOS/zsh)
+
+1. Generar o completar las credenciales locales sin reemplazar variables ya existentes:
+
+   ```bash
+   bash scripts/prepare-env.sh
+   ```
+
+   El script requiere Python 3.12 o posterior disponible como `python3`. Crea `.env` si falta o agrega las variables de infraestructura ausentes, genera contraseñas aleatorias para MongoDB y MinIO, y conserva los valores que ya existían. Agrega `MAP_KEY` manualmente a `.env` si usarás el consumidor FIRMS; no se necesita para iniciar la infraestructura.
+
+2. Crear el entorno virtual e instalar las dependencias fijadas en `uv.lock`:
+
+   ```bash
+   uv sync --locked
+   ```
+
+3. Descargar las imágenes fijadas en Compose e iniciar los servicios:
+
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+
+En ambas plataformas, la primera ejecución inicializa automáticamente las tres replica sets (config servers y dos shards), registra ambos shards en `mongos` y crea el bucket `firms-analytics` en MinIO.
 
 ### Servicios locales
 
