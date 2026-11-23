@@ -1,12 +1,12 @@
 # Proyecto final: detecciones de incendios y anomalías térmicas con NASA FIRMS
 
-Proyecto del curso **Bases de Datos No Relacionales (Otoño 2026)**. El objetivo es construir y documentar una arquitectura distribuida que convierta detecciones satelitales publicadas por [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) en datos operativos y analíticos. La fuente seleccionada es real; la arquitectura, los procesos y los resultados analíticos todavía están por implementarse.
+Proyecto del curso **Bases de Datos No Relacionales (Otoño 2026)**. El objetivo es construir y documentar una arquitectura distribuida que convierta detecciones satelitales publicadas por [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) en datos operativos y analíticos. La infraestructura local y un polling inicial con escritura en MongoDB ya están implementados. El control de accesos, la carga histórica a MongoDB, el análisis con Spark/Parquet y el mapa con retraso de una hora son frentes pendientes.
 
 ## Fuente de datos y alcance preliminar
 
 El *Fire Information for Resource Management System* (FIRMS) de NASA distribuye detecciones de fuegos activos y otras anomalías térmicas derivadas de sensores satelitales. Cada fila identifica un píxel donde se detectó una anomalía, con coordenadas, momento de adquisición y mediciones asociadas. **Una detección no equivale necesariamente a un incendio distinto, a su ubicación exacta ni a su superficie quemada**: el punto representa el centro del píxel observado y pueden existir otras fuentes de calor o falsos positivos.
 
-La propuesta inicial es consultar datos **VIIRS de NOAA-20 y NOAA-21 a escala mundial**, sujetos a validación con el equipo y con pruebas de disponibilidad y caudal. El alcance inicial queda limitado a NOAA-20 y NOAA-21; S-NPP y MODIS no se incluyen en esta etapa. NASA FIRMS publica resultados de la API en **lotes CSV**, no mediante un flujo de eventos individual de tipo push. El proyecto propone consultar periódicamente la API, identificar las detecciones nuevas, deduplicarlas y emitirlas como eventos hacia el sistema de ingesta. La frecuencia de consulta, la latencia, los criterios de identidad y el manejo de correcciones están pendientes de diseño y prueba.
+El alcance inicial consulta datos **VIIRS de NOAA-20 y NOAA-21 a escala mundial**; S-NPP y MODIS no se incluyen en esta etapa. NASA FIRMS publica resultados de la API en **lotes CSV**, no mediante un flujo de eventos individual de tipo push. `etl/actual.py` consulta cada minuto, establece una línea base al arrancar, identifica filas nuevas durante esa ejecución y las inserta en MongoDB. La cadencia real de publicación, las correcciones y el caudal sostenido deben medirse.
 
 ### Enlaces oficiales
 
@@ -45,14 +45,14 @@ Estos 13 atributos están descritos en la tabla de NASA para VIIRS NRT. Una prue
 
 ## Arquitectura objetivo
 
-La arquitectura objetivo procesa detecciones globales **VIIRS de NOAA-20 y NOAA-21** publicadas por NASA FIRMS. En esta primera etapa se prepara la infraestructura local reproducible; el consumidor, los jobs analíticos y la visualización se implementarán en fases posteriores.
+La arquitectura procesa detecciones globales **VIIRS de NOAA-20 y NOAA-21** publicadas por NASA FIRMS. La infraestructura local y la ingesta inicial están disponibles; el resto del flujo se completará en ramas de trabajo coordinadas.
 
 ### Flujo de Datos
-1. **Ingesta (Consumidor Python):** Un servicio consulta periódicamente los lotes CSV de la API de NASA FIRMS (combinando sensores para sostener un caudal promedio $\ge 1$ evento/segundo) e inserta los eventos crudos directamente en MongoDB como estado de verdad operativa.
-2. **Capa Operativa y Seguridad (MongoDB):** Clúster distribuido en Docker con **sharding y replicación** (priorizando **CP** según el teorema CAP). Cuenta con índices geoespaciales (`2dsphere`) y temporales para consultas de baja latencia, control de accesos basado en roles (**RBAC** con usuarios independientes por servicio), autenticación interna mediante `keyFile`, aislamiento en red privada y gestión de credenciales con `.env`.
-3. **Procesamiento y Enriquecimiento (Apache Spark):** Jobs distribuidos que leen los eventos crudos desde MongoDB para eliminar duplicados, normalizar marcas de tiempo (ISO-8601) y coordenadas (GeoJSON), y enriquecer cada detección cruzándola espacialmente con datasets estáticos (países/regiones, áreas naturales protegidas y volcanes/zonas industriales).
-4. **Capa Analítica (OLAP):** Los datos limpios y enriquecidos se almacenan como archivos Parquet en MinIO, compatible con la API S3, para ejecutar consultas analíticas complejas y garantizar la trazabilidad completa del ciclo de vida del dato.
-5. **Visualización en Tiempo Real:** Un backend escucha las inserciones en MongoDB mediante **Change Streams** y transmite los eventos nuevos vía **SSE/WebSockets** hacia un mapa interactivo con aceleración WebGL (**MapLibre GL JS + Deck.gl**), permitiendo monitorear intensidad (`FRP`), filtros de confianza y evolución temporal sin recargar la página.
+1. **Ingesta (Python, implementada inicialmente):** `etl/actual.py` consulta NOAA-20/21 NRT cada minuto, omite la línea base inicial y hace upsert de nuevas filas en `firms.events`. Guarda además un CSV con los documentos insertados en esa sesión. La autenticación actual usa el usuario root local; se reemplazará por una cuenta de servicio con privilegios mínimos.
+2. **Capa Operativa y Seguridad (MongoDB):** El compose levanta `mongos`, dos shards y sus replica sets. El acceso de usuarios de aplicación con roles independientes (**RBAC**) está pendiente. Índices de consulta, clave de shard y permisos de lectura/escritura se deben acordar con las ramas de ingesta, Spark y mapa antes de aplicarlos.
+3. **Procesamiento histórico (Apache Spark, pendiente):** Leerá el archivo entregado por FIRMS Archive Download, normalizará tipos y `acq_date`/`acq_time`, y producirá consultas analíticas. No debe borrar ni modificar el CSV original.
+4. **Capa Analítica (Parquet en MinIO, pendiente):** Spark escribirá resultados limpios/enriquecidos como Parquet en el bucket `firms-analytics`; el esquema y la estrategia de particionado deben quedar documentados.
+5. **Mapa con retraso de una hora (pendiente):** Un backend consumirá eventos de MongoDB y mostrará puntos en el mapa. Para medir el retraso desde la ingesta con exactitud, los documentos necesitan `ingested_at` UTC; esa marca aún no se guarda en `etl/actual.py` y debe acordarse con la rama de ingesta antes de implementar el filtro de 60 minutos.
 
 ## Entorno local reproducible
 
@@ -133,7 +133,37 @@ docker compose logs mongo-config-init mongo-shard1-init mongo-shard2-init mongo-
 
 El Compose fija versiones de MongoDB, Spark y MinIO. Para MinIO usa `dappros/minio`, una copia espejo de terceros, porque los repositorios oficiales ya no permitieron completar pulls anónimos desde esta instalación. El inicializador crea el bucket mediante la API S3 con Python estándar, sin depender de la imagen `mc`. La imagen de MinIO es un espejo no oficial; esta configuración es para desarrollo local del proyecto, no una recomendación de despliegue productivo.
 
-Esta etapa no incluye todavía el consumidor de FIRMS, los jobs Spark de limpieza/enriquecimiento ni el backend y mapa. Por ello, iniciar los contenedores no equivale a demostrar el caudal de la fuente, la carga de datos ni las cinco consultas analíticas.
+La extracción histórica deja un archivo de FIRMS en `data/`; el polling reciente inserta eventos en MongoDB y conserva un CSV de la sesión. La carga histórica del archivo a MongoDB, los jobs Spark de limpieza/enriquecimiento y el backend y mapa siguen pendientes. Iniciar los contenedores o extraer datos no demuestra por sí mismo el caudal de la fuente ni las cinco consultas analíticas.
+### Extracción histórica de FIRMS
+
+`etl/historic.py` coloca en `data/raw/firms/historic/` el archivo obtenido con **FIRMS Archive Download** y lo nombra `extraction-<timestamp-UTC>.<extensión>`. La salida local de `data/` está excluida de Git.
+
+La orden de archivo se solicita manualmente en [FIRMS Archive Download](https://firms.modaps.eosdis.nasa.gov/download/): selecciona los productos NOAA-20 y NOAA-21, área mundial, el intervalo de fechas requerido y CSV. FIRMS procesa la solicitud y envía por correo el enlace para descargarla. Guarda el archivo descargado localmente y luego pásale la ruta al script:
+
+```bash
+uv run python etl/historic.py --archive-file "/ruta/al/archivo_firms.csv"
+```
+
+En PowerShell, por ejemplo:
+
+```powershell
+uv run python etl/historic.py --archive-file "C:\Users\usuario\Downloads\archivo_firms.csv"
+```
+
+El script valida que el CSV tenga columnas de coordenadas (o que el ZIP sea legible), copia el archivo sin transformar sus registros y conserva su extensión. FIRMS no documenta una API pública para automatizar el envío de esta orden; por eso la solicitud y descarga iniciales son manuales. Esta etapa no normaliza ni inserta todavía los datos en MongoDB. [Archivo FIRMS](https://firms.modaps.eosdis.nasa.gov/download/).
+
+### Polling de datos recientes
+
+`etl/actual.py` primero verifica la conexión con MongoDB (`MONGO_HOST`, `MONGO_PORT`, usuario/contraseña de `.env`, autenticación en `admin`). Si Mongo responde, consulta cada minuto los productos NRT de NOAA-20 y NOAA-21 en el área mundial. El primer sondeo de cada producto solo establece la línea base y descarta las detecciones que ya estaban publicadas; después inserta en `firms.events` las filas nuevas con `acq_date` + `acq_time` combinados en `acq_datetime_utc` UTC. El `_id` determinista evita duplicar una fila idéntica si se reinicia el proceso. También conserva en CSV los eventos efectivamente insertados en `data/raw/firms/actual/extraction-<inicio-UTC>.csv`. La consola informa la línea base del primer sondeo y, después, los conteos de inserciones por satélite.
+
+Con `MAP_KEY` configurada en `.env`, inicia el polling desde la raíz del proyecto:
+
+```bash
+uv run python etl/actual.py
+```
+
+Detén con `Ctrl+C`. Para cambiar el intervalo o el área, consulta `uv run python etl/actual.py --help`. La línea base vive en memoria y se vuelve a establecer al reiniciar. MongoDB usa un `_id` determinista derivado de la fila y el producto para evitar duplicados entre ejecuciones; si cambia cualquier campo de origen, se guarda como un documento distinto. La consola cuenta inserciones nuevas en MongoDB.
+
 ## Caudal y viabilidad del requisito de stream
 
 La rúbrica exige un promedio mínimo de **1 evento por segundo** y permite combinar fuentes. En una revisión previa comunicada por el equipo, para el **8 de noviembre de 2026** a escala mundial se reportaron **119 498 detecciones VIIRS NOAA-20 y NOAA-21**, equivalentes a aproximadamente **1,38 detecciones por segundo** en ese día; al añadir MODIS se reportaron **131 462 detecciones**, aproximadamente **1,52 por segundo**. Son antecedentes de una sola fecha, **no mediciones reproducidas en este repositorio ni garantía de caudal sostenido, entrega uniforme o eventos nuevos en cada segundo**. Se medirá el volumen en varios días, separado por producto, y se registrará tanto el caudal de detecciones únicas como el de eventos realmente ingresados sin pérdida. También se consultará al profesor si acepta el esquema de consulta periódica y emisión de eventos como stream del proyecto.
@@ -146,8 +176,61 @@ Las detecciones pueden omitirse por nubosidad, humo, cobertura vegetal, tamaño 
 
 1. **Validación de la fuente:** fijar productos y región, capturar encabezados reales, medir varios días de datos y acordar con el profesor el mecanismo de conversión de lotes a eventos.
 2. **Infraestructura:** documentar y desplegar una base NoSQL operativa con replicación y sharding, una capa analítica apropiada, control de accesos, diagramas y una justificación explícita en términos de CAP. La infraestructura local usa MongoDB para la capa operacional, Spark para procesamiento y Parquet en MinIO para la capa analítica.
-3. **Ingesta:** implementar consulta periódica, deduplicación, manejo de errores, inserción y consultas puntuales; medir caudal, pérdida y recuperación ante fallos.
-4. **Procesamiento:** limpiar y tipar datos, enriquecerlos con fuentes estáticas cuando aporte valor, conservar trazabilidad y preparar agregaciones analíticas.
-5. **Resultados:** ejecutar al menos cinco consultas analíticas complejas, explicar hallazgos e impacto, y mostrar la evolución desde el CSV crudo hasta la información transformada.
+3. **Ingesta:** el polling y el upsert inicial están implementados. Falta una cuenta de servicio de privilegios mínimos, el marcador **ingested_at**, manejo de revisiones, métricas persistentes y evaluación de pérdida/recuperación.
+4. **Procesamiento:** falta cargar el archivo histórico en Spark, normalizar y tipar los datos, producir Parquet en MinIO y conservar trazabilidad.
+5. **Visualización:** falta el mapa y acordar el filtro de una hora usando una marca de tiempo explícita.
+6. **Resultados:** ejecutar al menos cinco consultas analíticas complejas, explicar hallazgos e impacto, y mostrar la evolución desde el CSV crudo hasta la información transformada.
 
-El código, las instrucciones de ejecución, las pruebas, las decisiones de diseño, los diagramas y los resultados se incorporarán a este repositorio conforme se implementen. Hasta entonces, este README documenta **la fuente elegida y el estado preliminar**, no una arquitectura ya desplegada.
+El código, las instrucciones, las decisiones de diseño, los diagramas y los resultados se incorporarán a este repositorio conforme se implementen. Este README distingue entre infraestructura local disponible, ingesta inicial y componentes aún pendientes.
+
+## Anexo: recomendaciones para trabajar en ramas e integrar cambios
+
+### Ramas y responsabilidad
+
+Partan de la misma versión actualizada de main y asignen una persona responsable por componente:
+
+| Rama sugerida | Responsable | Alcance principal |
+| --- | --- | --- |
+| **feature/mongo-rbac** | Control de accesos | Usuarios/roles de aplicación, inicialización segura, variables de entorno y conexión del consumidor con el usuario de ingesta. |
+| **feature/mapa-delay-1h** | Mapa | Servicio/API del mapa, conexión Mongo de solo lectura, interfaz y política de retraso de una hora. |
+| **feature/spark-historico-parquet** | Análisis histórico | Lectura del archivo bajo **data/raw/firms/historic/**, procesamiento Spark, consultas y salida Parquet en MinIO. |
+
+Antes de crear las ramas, integren y hagan commit en main del estado actual de este repositorio, incluidos los nuevos scripts y documentación. Mantengan la edición del README a cargo de una sola persona de integración. La rama RBAC será responsable de docker-compose.yaml y de los scripts de inicialización Mongo; las demás ramas deben pedirle los cambios que necesiten en esos archivos. Si un componente necesita cambios compartidos, acuerden el contrato y el archivo responsable antes de editarlo. Agreguen documentación específica por componente en docs/ para evitar que varias ramas reescriban el README a la vez. No agreguen .env, archivos históricos ni resultados generados: data/ y los secretos locales están excluidos de Git.
+
+### Contratos compartidos
+
+- **MongoDB:** el router local es localhost:27017; la base y colección actuales son firms.events. En Compose los servicios usan mongo-router:27017.
+- **Documento actual:** _id es un SHA-256 determinista de la fila original y el producto FIRMS; source_product contiene VIIRS_NOAA20_NRT o VIIRS_NOAA21_NRT; acq_datetime_utc es una fecha BSON UTC. Los demás campos FIRMS se guardan por ahora como cadenas. Una fila corregida con cambios de contenido obtiene otro _id.
+- **Seguridad:** el consumidor actual conecta con credenciales root locales. La rama RBAC debe definir nombres de variables y roles de servicio, y coordinar el cambio de etl/actual.py para que escriba con el usuario de ingesta. El mapa debe tener solo lectura; no compartan las credenciales root con servicios.
+- **Retraso del mapa:** el documento todavía no tiene ingested_at. Antes de bifurcar, acuerden si la persona de integración hará un commit pequeño en etl/actual.py para agregar esa marca UTC, o si la rama de RBAC la incluirá junto con la conexión del consumidor. Para retrasar desde la recepción, el filtro será ingested_at <= now - 1 hour. No sustituyan esta marca por acq_datetime_utc: son momentos distintos. Si la intención era retrasar una hora desde la observación satelital, documenten esa semántica antes de fijar el filtro.
+- **Histórico y Spark:** etl/historic.py coloca el archivo original en data/raw/firms/historic/; los nombres incluyen un timestamp. El Spark job debe aceptar esa ruta como entrada, preservar el original y documentar esquema, campos derivados, particiones y ubicación de salida bajo el bucket firms-analytics. El Compose Spark actual no monta data/; para ejecutar dentro de Docker habrá que acordar un volumen o un mecanismo de entrega del archivo.
+- **Esquema analítico:** antes de mergear, acuerden nombres/tipos de campos, columnas particionadas de Parquet, comportamiento ante correcciones y si el mapa lee directamente Mongo o una API intermedia.
+
+### Orden de integración recomendado
+
+1. Fusionar primero feature/mongo-rbac, porque define las credenciales y permisos que usarán los otros servicios.
+2. Integrar feature/spark-historico-parquet usando el contrato de entrada/salida acordado y las credenciales de lectura necesarias.
+3. Integrar feature/mapa-delay-1h después de que exista el rol de lectura y el campo ingested_at.
+4. Después de cada merge, actualizar las otras ramas con main, resolver conflictos en una sola rama responsable y volver a comprobar que el compose y los contratos siguen consistentes.
+
+Ejemplo de creación de rama desde una copia actualizada (asume un remoto llamado origin):
+
+~~~bash
+git switch main
+git pull --ff-only
+git switch -c feature/mongo-rbac
+git push -u origin feature/mongo-rbac
+~~~
+
+Cada responsable trabaja y sube solo su rama. Antes de abrir la solicitud de merge, debe actualizarla contra el main ya integrado (por ejemplo, git fetch origin y git rebase origin/main), revisar el diff y confirmar que no incluye secretos ni datos locales. Fusionen una rama a la vez para poder localizar conflictos. Después de cada merge, los responsables restantes actualizan su rama y vuelven a comprobar sus contratos.
+
+Orden sugerido: RBAC primero; luego Spark histórico; mapa al final, cuando existan el rol de lectura y ingested_at. La persona de integración puede fusionar cada rama con una solicitud de revisión o con:
+
+~~~bash
+git switch main
+git pull --ff-only
+git merge --no-ff origin/feature/mongo-rbac
+git push origin main
+~~~
+
+Después de cada integración, comprueben conexión/autorización Mongo, la lectura del CSV histórico, la escritura Parquet en MinIO y que el mapa realmente oculte eventos hasta cumplir el retraso acordado.
